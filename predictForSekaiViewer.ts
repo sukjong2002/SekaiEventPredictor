@@ -42,15 +42,31 @@ async function main() {
   await downloadModel();
   await predictAll();
 
+  // Load simple format for backward compatibility
   let outJson = JSON.parse(
     readFileSync(
       process.env.IS_SERVERLESS ? "/tmp/out-predict.json" : "out-predict.json",
       "utf-8"
     )
   );
+
+  // Load detailed format with confidence intervals
+  let outJsonDetailed = JSON.parse(
+    readFileSync(
+      process.env.IS_SERVERLESS ? "/tmp/out-predict-detailed.json" : "out-predict-detailed.json",
+      "utf-8"
+    )
+  );
+
   for (const r in outJson) {
     let pre = outJson[r];
+    // Keep simple format for backward compatibility
     client.set(`predict-${r}`, pre.toString());
+
+    // Store detailed prediction with confidence intervals
+    if (outJsonDetailed[r]) {
+      client.set(`predict-detailed-${r}`, JSON.stringify(outJsonDetailed[r]));
+    }
   }
   client.set(`predict-ts`, new Date().getTime());
 }

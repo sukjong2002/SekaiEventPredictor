@@ -1,5 +1,5 @@
 import axios from "axios";
-import { EventData, EventRanking } from "./Struct";
+import { EventData, EventRanking, PredictionResult, ConfidenceInterval, PredictionModel, DailyProjection, TimePoint } from "./Struct";
 import { readFileSync, writeFileSync } from "fs";
 import HttpsProxyAgent from 'https-proxy-agent';
 
@@ -217,7 +217,155 @@ function processLSE(today: number[], target: number[]) {
     return mid;
 }
 
-async function predict(rank: number) {
+function calculateConfidenceInterval(
+    prediction: number,
+    modelStdDev: number,
+    confidenceLevel: number
+): ConfidenceInterval {
+    // Z-scores for common confidence levels
+    // 95% -> 1.96, 90% -> 1.645, 80% -> 1.28
+    const zScore = confidenceLevel === 95 ? 1.96 : 1.28;
+
+    // The prediction uncertainty is proportional to model standard deviation
+    const predictionStdDev = prediction * modelStdDev;
+    const margin = zScore * predictionStdDev;
+
+    return {
+        lower: Math.max(0, Math.round(prediction - margin)),
+        upper: Math.round(prediction + margin)
+    };
+}
+
+function getModelStdDev(model: PredictionModel, rank: number, halfTime: number, isLastDay: boolean): number {
+    // Get standard deviation from the model at the current time point
+    if (isLastDay && model.lastDayPeriodStdDev && model.lastDayPeriodStdDev[rank]) {
+        return model.lastDayPeriodStdDev[rank][halfTime] || 0;
+    } else if (!isLastDay && model.dayPeriodStdDev && model.dayPeriodStdDev[rank]) {
+        return model.dayPeriodStdDev[rank][halfTime] || 0;
+    }
+    return 0;
+}
+
+function calculateDailyProjection(
+    dayScores: number[],
+    lastDayEnd: number,
+    totalDays: number,
+    finalPrediction: number,
+    scorePerNormalDay: number,
+    model: PredictionModel,
+    rank: number
+): DailyProjection[] {
+    let projection: DailyProjection[] = [];
+
+    // Day 0 (always 0)
+    projection.push({
+        day: 0,
+        endScore: dayScores[0] || 0,
+        isActual: true
+    });
+
+    // Days 1 to lastDayEnd (actual data)
+    for (let d = 1; d < lastDayEnd; d++) {
+        if (dayScores[d] > 0) {
+            projection.push({
+                day: d,
+                endScore: Math.round(dayScores[d]),
+                isActual: true
+            });
+        }
+    }
+
+    // Current/future days (predicted)
+    for (let d = lastDayEnd; d <= totalDays; d++) {
+        let predictedScore: number;
+
+        if (d < totalDays) {
+            // Normal days: use average score per day
+            predictedScore = dayScores[0] + scorePerNormalDay * d;
+        } else {
+            // Last day: use final prediction
+            predictedScore = finalPrediction;
+        }
+
+        // Calculate confidence intervals for predicted days
+        // Use a simple scaling based on days ahead
+        let daysAhead = d - lastDayEnd + 1;
+        let baseStdDev = model.dayPeriodStdDev?.[rank]?.[24] || 0.05; // Mid-day std dev
+        let scaledStdDev = baseStdDev * Math.sqrt(daysAhead); // Uncertainty grows with time
+
+        projection.push({
+            day: d,
+            endScore: Math.round(predictedScore),
+            isActual: false,
+            confidence95: calculateConfidenceInterval(predictedScore, scaledStdDev, 95),
+            confidence80: calculateConfidenceInterval(predictedScore, scaledStdDev, 80)
+        });
+    }
+
+    return projection;
+}
+
+function calculateHourlyProjectionToday(
+    todayScores: number[],
+    todayBeginScore: number,
+    predictedTodayEndScore: number,
+    currentHalfTime: number,
+    model: PredictionModel,
+    rank: number,
+    isLastDay: boolean
+): TimePoint[] {
+    let projection: TimePoint[] = [];
+    let now = new Date();
+
+    // Get the day period model to use
+    let periodModel = isLastDay ? model.lastDayPeriod[rank] : model.dayPeriod[rank];
+    let periodStdDev = isLastDay ? model.lastDayPeriodStdDev?.[rank] : model.dayPeriodStdDev?.[rank];
+
+    // Calculate today's predicted increment
+    let todayIncrement = predictedTodayEndScore - todayBeginScore;
+
+    // Generate time points from current to end of day (48 half-hours)
+    for (let h = 0; h <= 47; h++) {
+        // Calculate timestamp (15:00 UTC previous day + h * 30 minutes)
+        let timestamp = new Date(eventStartTime - 15 * 3600 * 1000 + h * 30 * 60 * 1000);
+
+        // Check if this is actual or predicted
+        let isActual = h <= currentHalfTime && todayScores[h] > 0;
+        let score: number;
+
+        if (isActual) {
+            // Use actual data
+            score = todayBeginScore + todayScores[h];
+        } else {
+            // Predict based on model
+            if (!periodModel || !periodModel[h]) continue;
+
+            let relativeProgress = periodModel[h];
+            score = todayBeginScore + todayIncrement * relativeProgress;
+
+            // Calculate confidence intervals
+            let stdDev = periodStdDev?.[h] || 0.05;
+            projection.push({
+                timestamp: timestamp,
+                score: Math.round(score),
+                isActual: false,
+                confidence95: calculateConfidenceInterval(score, stdDev, 95),
+                confidence80: calculateConfidenceInterval(score, stdDev, 80)
+            });
+            continue;
+        }
+
+        projection.push({
+            timestamp: timestamp,
+            score: Math.round(score),
+            isActual: isActual
+        });
+    }
+
+    return projection;
+}
+
+async function predict(rank: number): Promise<PredictionResult | null> {
     console.log()
     //Debug Info
     let debugInfo = {
@@ -242,12 +390,12 @@ async function predict(rank: number) {
                 : `predict_models_${eventType}.json`,
             "utf-8"
         )
-    );
+    ) as PredictionModel;
     //Get scores
     let scores = await getScores(rank);
     if (scores.length === 0) {
         console.log(`T${rank} Cannot predict: No data`);
-        return 0;
+        return null;
     }
     scores.forEach(it => {
         debugInfo.scores[getHalfTimeFromBegin(it.timestamp)] = it.score;
@@ -267,7 +415,7 @@ async function predict(rank: number) {
     })
     if (firstUsefulDay <= 0) {
         console.log(`T${rank} Cannot predict: Event just started in a day`);
-        return 0;
+        return null;
     }
     debugInfo.firstUsefulDay = firstUsefulDay;
     if (debug) console.log(`firstUsefulDay:${firstUsefulDay}`);
@@ -330,7 +478,53 @@ async function predict(rank: number) {
         );
         debugInfo.result = result;
         debugJson.ranks[rank] = debugInfo;
-        return result;
+
+        // Calculate confidence intervals
+        let modelStdDev = getModelStdDev(model, rank, halfTime, false);
+        let stdDev = result * modelStdDev;
+
+        // Calculate daily projection
+        let dailyProjection = calculateDailyProjection(
+            day,
+            lastDayEnd,
+            days,
+            result,
+            scorePerNormalDay,
+            model,
+            rank
+        );
+
+        // Calculate predicted today end score
+        let predictedTodayEndScore = lastDayEnd < days
+            ? (day[0] + scorePerNormalDay * lastDayEnd)
+            : result;
+
+        // Calculate hourly projection for today
+        let hourlyProjectionToday = calculateHourlyProjectionToday(
+            todayScores,
+            todayBeginScore,
+            predictedTodayEndScore,
+            halfTime,
+            model,
+            rank,
+            false
+        );
+
+        // Get current score (last actual score)
+        let currentScore = scores.length > 0 ? scores[scores.length - 1].score : 0;
+
+        return {
+            rank: rank,
+            prediction: result,
+            currentScore: currentScore,
+            currentDay: lastDayEnd,
+            currentTime: new Date(),
+            confidence95: calculateConfidenceInterval(result, modelStdDev, 95),
+            confidence80: calculateConfidenceInterval(result, modelStdDev, 80),
+            stdDev: stdDev,
+            dailyProjection: dailyProjection,
+            hourlyProjectionToday: hourlyProjectionToday
+        };
     } else {
         if (debug) console.log(todayBeginScore);
         //Last day
@@ -369,29 +563,86 @@ async function predict(rank: number) {
         let result = Math.round(todayBeginScore + todayScore);
         debugInfo.result = result;
         debugJson.ranks[rank] = debugInfo;
-        return result;
+
+        // Calculate confidence intervals
+        let modelStdDev = getModelStdDev(model, rank, halfTime, true);
+        let stdDev = result * modelStdDev;
+
+        // Calculate scorePerNormalDay for daily projection
+        let scorePerNormalDay = (todayBeginScore - day[0]) / (days - 1);
+
+        // Calculate daily projection
+        let dailyProjection = calculateDailyProjection(
+            day,
+            lastDayEnd,
+            days,
+            result,
+            scorePerNormalDay,
+            model,
+            rank
+        );
+
+        // Calculate predicted today end score (which is the final result on last day)
+        let predictedTodayEndScore = result;
+
+        // Calculate hourly projection for today
+        let hourlyProjectionToday = calculateHourlyProjectionToday(
+            todayScores,
+            todayBeginScore,
+            predictedTodayEndScore,
+            halfTime,
+            model,
+            rank,
+            true
+        );
+
+        // Get current score (last actual score)
+        let currentScore = scores.length > 0 ? scores[scores.length - 1].score : 0;
+
+        return {
+            rank: rank,
+            prediction: result,
+            currentScore: currentScore,
+            currentDay: lastDayEnd,
+            currentTime: new Date(),
+            confidence95: calculateConfidenceInterval(result, modelStdDev, 95),
+            confidence80: calculateConfidenceInterval(result, modelStdDev, 80),
+            stdDev: stdDev,
+            dailyProjection: dailyProjection,
+            hourlyProjectionToday: hourlyProjectionToday
+        };
     }
 }
 
 export async function predictAll(begin: number = 0) {
     await updateEvent();
     let outJson: Record<string, any> = {};
+    let outJsonDetailed: Record<string, any> = {};
     let count = 0;
     for (const r of ranks) {
         if (r < begin) continue;
-        let pre = await predict(r);
-        if (pre > 0) {
-            console.log(`T${r} ${pre}`);
+        let predictionResult = await predict(r);
+        if (predictionResult !== null) {
+            console.log(`T${r} ${predictionResult.prediction} (95% CI: ${predictionResult.confidence95?.lower}-${predictionResult.confidence95?.upper})`);
             if (debug) console.log("");
-            outJson[r] = pre;
+            // Keep backward compatibility: simple output for existing consumers
+            outJson[r] = predictionResult.prediction;
+            // Detailed output with confidence intervals
+            outJsonDetailed[r] = predictionResult;
             count++;
         }
     }
 
     if (count > 0) {
+        // Write simple format for backward compatibility
         writeFileSync(
             process.env.IS_SERVERLESS ? "/tmp/out-predict.json" : "out-predict.json",
             JSON.stringify(outJson)
+        );
+        // Write detailed format with confidence intervals
+        writeFileSync(
+            process.env.IS_SERVERLESS ? "/tmp/out-predict-detailed.json" : "out-predict-detailed.json",
+            JSON.stringify(outJsonDetailed, null, 2)
         );
     }
 
@@ -401,3 +652,10 @@ export async function predictAll(begin: number = 0) {
     }
 }
 
+// Entry point: Run predictAll when script is executed directly
+if (require.main === module) {
+    predictAll().catch(error => {
+        console.error('Error during prediction:', error);
+        process.exit(1);
+    });
+}

@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sekai Event Predictor Visualization</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .event-info {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .event-info p {
+            margin: 5px 0;
+            color: #666;
+        }
+
+        .chart-section {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .chart-section h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 500px;
+            margin-bottom: 20px;
+        }
+
+        .rank-selector {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+
+        .rank-button {
+            padding: 8px 16px;
+            border: 2px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .rank-button:hover {
+            border-color: #4CAF50;
+        }
+
+        .rank-button.active {
+            background: #4CAF50;
+            color: white;
+            border-color: #4CAF50;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stat-card {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .stat-card h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .stat-card p {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Sekai Event Predictor Visualization</h1>
+
+        <div id="event-info" class="event-info">
+            <p><strong>Loading...</strong></p>
+        </div>
+
+        <div class="chart-section">
+            <h2>일별 예측 (Daily Projection)</h2>
+            <div class="rank-selector" id="daily-rank-selector"></div>
+            <div class="chart-container">
+                <canvas id="daily-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-section">
+            <h2>당일 시간별 예측 (Hourly Projection Today)</h2>
+            <div class="rank-selector" id="hourly-rank-selector"></div>
+            <div class="chart-container">
+                <canvas id="hourly-chart"></canvas>
+            </div>
+        </div>
+
+        <div id="test-results" class="chart-section" style="display: none;">
+            <h2>테스트 결과 요약 (Test Results Summary)</h2>
+            <div class="stats-grid" id="stats-grid"></div>
+        </div>
+    </div>
+
+    <script>
+        let predictionData = null;
+        let debugData = null;
+        let dailyChart = null;
+        let hourlyChart = null;
+        let selectedDailyRanks = new Set();
+        let selectedHourlyRanks = new Set();
+
+        // Color palette for different ranks
+        const colors = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0',
+            '#9966FF', '#FF9F40', '#FF6384', '#C9CBCF'
+        ];
+
+        async function loadData() {
+            try {
+                // Load detailed prediction data
+                const predResponse = await fetch('out-predict-detailed.json');
+                if (!predResponse.ok) {
+                    throw new Error('Failed to load out-predict-detailed.json. Run "ts-node predict.ts" first.');
+                }
+                predictionData = await predResponse.json();
+
+                // Try to load debug data (may not exist in normal mode)
+                try {
+                    const debugResponse = await fetch('predict-debug.json');
+                    if (debugResponse.ok) {
+                        debugData = await debugResponse.json();
+                    }
+                } catch (e) {
+                    console.log('Debug data not available (normal mode)');
+                }
+
+                displayEventInfo();
+                setupRankSelectors();
+
+                // Select first 3 ranks by default
+                const ranks = Object.keys(predictionData).map(Number).sort((a, b) => a - b);
+                ranks.slice(0, 3).forEach(rank => {
+                    selectedDailyRanks.add(rank);
+                    selectedHourlyRanks.add(rank);
+                });
+
+                updateRankButtons();
+                renderDailyChart();
+                renderHourlyChart();
+
+                if (debugData && debugData.testResults) {
+                    displayTestResults();
+                }
+            } catch (error) {
+                document.getElementById('event-info').innerHTML =
+                    `<div class="error-message">${error.message}</div>`;
+            }
+        }
+
+        function displayEventInfo() {
+            const ranks = Object.keys(predictionData);
+            const firstRank = predictionData[ranks[0]];
+
+            let html = `
+                <p><strong>Event:</strong> ${debugData?.testEventId || 'Current Event'}</p>
+                <p><strong>Event Type:</strong> ${debugData?.eventType || 'N/A'}</p>
+                <p><strong>Current Day:</strong> ${firstRank.currentDay} / ${debugData?.days || 'N/A'}</p>
+                <p><strong>Prediction Time:</strong> ${new Date(firstRank.currentTime).toLocaleString()}</p>
+            `;
+
+            if (debugData?.testMode) {
+                html += `
+                    <p><strong>Test Mode:</strong> Testing at ${(debugData.testProgressRatio * 100).toFixed(0)}% progress</p>
+                `;
+            }
+
+            document.getElementById('event-info').innerHTML = html;
+        }
+
+        function setupRankSelectors() {
+            const ranks = Object.keys(predictionData).map(Number).sort((a, b) => a - b);
+
+            const dailySelector = document.getElementById('daily-rank-selector');
+            const hourlySelector = document.getElementById('hourly-rank-selector');
+
+            ranks.forEach((rank, idx) => {
+                // Daily selector
+                const dailyBtn = document.createElement('button');
+                dailyBtn.className = 'rank-button';
+                dailyBtn.textContent = `T${rank}`;
+                dailyBtn.onclick = () => toggleDailyRank(rank);
+                dailySelector.appendChild(dailyBtn);
+
+                // Hourly selector
+                const hourlyBtn = document.createElement('button');
+                hourlyBtn.className = 'rank-button';
+                hourlyBtn.textContent = `T${rank}`;
+                hourlyBtn.onclick = () => toggleHourlyRank(rank);
+                hourlySelector.appendChild(hourlyBtn);
+            });
+        }
+
+        function toggleDailyRank(rank) {
+            if (selectedDailyRanks.has(rank)) {
+                selectedDailyRanks.delete(rank);
+            } else {
+                selectedDailyRanks.add(rank);
+            }
+            updateRankButtons();
+            renderDailyChart();
+        }
+
+        function toggleHourlyRank(rank) {
+            if (selectedHourlyRanks.has(rank)) {
+                selectedHourlyRanks.delete(rank);
+            } else {
+                selectedHourlyRanks.add(rank);
+            }
+            updateRankButtons();
+            renderHourlyChart();
+        }
+
+        function updateRankButtons() {
+            const dailyButtons = document.getElementById('daily-rank-selector').children;
+            const hourlyButtons = document.getElementById('hourly-rank-selector').children;
+            const ranks = Object.keys(predictionData).map(Number).sort((a, b) => a - b);
+
+            ranks.forEach((rank, idx) => {
+                dailyButtons[idx].classList.toggle('active', selectedDailyRanks.has(rank));
+                hourlyButtons[idx].classList.toggle('active', selectedHourlyRanks.has(rank));
+            });
+        }
+
+        function renderDailyChart() {
+            const ctx = document.getElementById('daily-chart');
+
+            if (dailyChart) {
+                dailyChart.destroy();
+            }
+
+            const datasets = [];
+            const selectedRanks = Array.from(selectedDailyRanks).sort((a, b) => a - b);
+
+            selectedRanks.forEach((rank, idx) => {
+                const rankData = predictionData[rank];
+                const color = colors[idx % colors.length];
+
+                // Main prediction line
+                const mainData = rankData.dailyProjection.map(d => ({
+                    x: d.day,
+                    y: d.endScore
+                }));
+
+                datasets.push({
+                    label: `T${rank}`,
+                    data: mainData,
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderWidth: 2,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    segment: {
+                        borderDash: ctx => {
+                            const idx = ctx.p0DataIndex;
+                            return rankData.dailyProjection[idx]?.isActual ? [] : [5, 5];
+                        }
+                    }
+                });
+
+                // 95% CI
+                const ci95Upper = [];
+                const ci95Lower = [];
+                rankData.dailyProjection.forEach(d => {
+                    if (d.confidence95) {
+                        ci95Upper.push({ x: d.day, y: d.confidence95.upper });
+                        ci95Lower.push({ x: d.day, y: d.confidence95.lower });
+                    }
+                });
+
+                if (ci95Upper.length > 0) {
+                    datasets.push({
+                        label: `T${rank} 95% CI Upper`,
+                        data: ci95Upper,
+                        borderColor: color + '40',
+                        backgroundColor: 'transparent',
+                        borderWidth: 1,
+                        borderDash: [2, 2],
+                        pointRadius: 0,
+                        fill: false
+                    });
+
+                    datasets.push({
+                        label: `T${rank} 95% CI Lower`,
+                        data: ci95Lower,
+                        borderColor: color + '40',
+                        backgroundColor: color + '10',
+                        borderWidth: 1,
+                        borderDash: [2, 2],
+                        pointRadius: 0,
+                        fill: '-1'
+                    });
+                }
+
+                // Add actual values if in test mode
+                if (debugData?.testResults?.[rank]) {
+                    const actual = debugData.testResults[rank].actual;
+                    const totalDays = debugData.days;
+
+                    datasets.push({
+                        label: `T${rank} Actual`,
+                        data: [{ x: totalDays, y: actual }],
+                        borderColor: color,
+                        backgroundColor: color,
+                        borderWidth: 3,
+                        pointRadius: 8,
+                        pointStyle: 'star',
+                        showLine: false
+                    });
+                }
+            });
+
+            dailyChart = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                filter: item => !item.text.includes('CI')
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y.toLocaleString();
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            title: {
+                                display: true,
+                                text: 'Day'
+                            },
+                            ticks: {
+                                stepSize: 1
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Score'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value.toLocaleString();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderHourlyChart() {
+            const ctx = document.getElementById('hourly-chart');
+
+            if (hourlyChart) {
+                hourlyChart.destroy();
+            }
+
+            const datasets = [];
+            const selectedRanks = Array.from(selectedHourlyRanks).sort((a, b) => a - b);
+
+            selectedRanks.forEach((rank, idx) => {
+                const rankData = predictionData[rank];
+                const color = colors[idx % colors.length];
+
+                // Filter out invalid data points
+                const validHourlyData = rankData.hourlyProjectionToday
+                    .filter(d => d.score > 0)
+                    .map(d => ({
+                        x: new Date(d.timestamp),
+                        y: d.score
+                    }));
+
+                if (validHourlyData.length === 0) return;
+
+                // Main prediction line
+                datasets.push({
+                    label: `T${rank}`,
+                    data: validHourlyData,
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    pointHoverRadius: 4,
+                    segment: {
+                        borderDash: ctx => {
+                            const idx = ctx.p0DataIndex;
+                            return rankData.hourlyProjectionToday[idx]?.isActual ? [] : [5, 5];
+                        }
+                    }
+                });
+
+                // 95% CI
+                const ci95Upper = [];
+                const ci95Lower = [];
+                rankData.hourlyProjectionToday.forEach(d => {
+                    if (d.confidence95 && d.score > 0) {
+                        ci95Upper.push({ x: new Date(d.timestamp), y: d.confidence95.upper });
+                        ci95Lower.push({ x: new Date(d.timestamp), y: d.confidence95.lower });
+                    }
+                });
+
+                if (ci95Upper.length > 0) {
+                    datasets.push({
+                        label: `T${rank} 95% CI Upper`,
+                        data: ci95Upper,
+                        borderColor: color + '40',
+                        backgroundColor: 'transparent',
+                        borderWidth: 1,
+                        borderDash: [2, 2],
+                        pointRadius: 0,
+                        fill: false
+                    });
+
+                    datasets.push({
+                        label: `T${rank} 95% CI Lower`,
+                        data: ci95Lower,
+                        borderColor: color + '40',
+                        backgroundColor: color + '10',
+                        borderWidth: 1,
+                        borderDash: [2, 2],
+                        pointRadius: 0,
+                        fill: '-1'
+                    });
+                }
+            });
+
+            hourlyChart = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                filter: item => !item.text.includes('CI')
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y.toLocaleString();
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'hour',
+                                displayFormats: {
+                                    hour: 'HH:mm'
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Score'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value.toLocaleString();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function displayTestResults() {
+            const testSection = document.getElementById('test-results');
+            const statsGrid = document.getElementById('stats-grid');
+            testSection.style.display = 'block';
+
+            const results = debugData.testResults;
+            const ranks = Object.keys(results);
+
+            let totalError = 0;
+            let totalErrorPercent = 0;
+            let withinCI95 = 0;
+            let withinCI80 = 0;
+
+            ranks.forEach(rank => {
+                const r = results[rank];
+                totalError += Math.abs(r.error);
+                totalErrorPercent += Math.abs(r.errorPercent);
+                if (r.withinCI95) withinCI95++;
+                if (r.withinCI80) withinCI80++;
+            });
+
+            const count = ranks.length;
+            const avgError = (totalError / count).toFixed(0);
+            const avgErrorPercent = (totalErrorPercent / count).toFixed(2);
+            const ci95Coverage = ((withinCI95 / count) * 100).toFixed(1);
+            const ci80Coverage = ((withinCI80 / count) * 100).toFixed(1);
+
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <h3>Total Ranks Tested</h3>
+                    <p>${count}</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Avg Absolute Error</h3>
+                    <p>${avgError}</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Avg Error %</h3>
+                    <p>${avgErrorPercent}%</p>
+                </div>
+                <div class="stat-card">
+                    <h3>95% CI Coverage</h3>
+                    <p>${ci95Coverage}%</p>
+                </div>
+                <div class="stat-card">
+                    <h3>80% CI Coverage</h3>
+                    <p>${ci80Coverage}%</p>
+                </div>
+            `;
+        }
+
+        // Load data on page load
+        loadData();
+    </script>
+</body>
+</html>

@@ -15,12 +15,18 @@
   "dependencies": {
     "@types/node": "^14.14.10",
     "axios": "^0.21.1",
+    "cors": "^2.8.5",
     "dateformat": "^4.0.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "https-proxy-agent": "^5.0.0",
     "minio": "^7.0.18",
-    "redis": "^4.0.2"
+    "redis": "^4.0.2",
+    "ts-node": "^10.9.2"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/minio": "^7.0.7",
     "serverless-openwhisk": "^0.18.4",
     "serverless-plugin-typescript": "^1.1.9",
