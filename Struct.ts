@@ -40,7 +40,7 @@ export interface TimePoint {
     timestamp: Date;          // 시점
     score: number;            // 점수 (실제 또는 예측)
     isActual: boolean;        // 실제 데이터 여부
-    confidence95?: ConfidenceInterval;  // 예측인 경우 신뢰구간
+    confidence70?: ConfidenceInterval;  // 예측인 경우 신뢰구간
     confidence80?: ConfidenceInterval;
 }
 
@@ -48,7 +48,7 @@ export interface DailyProjection {
     day: number;              // 일차 (0부터 시작)
     endScore: number;         // 해당 일의 끝 시점 점수 (15:00 UTC)
     isActual: boolean;        // 실제 데이터 여부
-    confidence95?: ConfidenceInterval;
+    confidence70?: ConfidenceInterval;
     confidence80?: ConfidenceInterval;
 }
 
@@ -60,7 +60,7 @@ export interface PredictionResult {
     currentTime: Date;        // 예측 시점
 
     // 신뢰구간 (최종 점수)
-    confidence95?: ConfidenceInterval;
+    confidence70?: ConfidenceInterval;
     confidence80?: ConfidenceInterval;
     stdDev?: number;
 

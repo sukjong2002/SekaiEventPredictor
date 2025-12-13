@@ -114,3 +114,6 @@ template/
 template
 build
 events.json
+validate_user*.ts
+reproduce*.ts
+

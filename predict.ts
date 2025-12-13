@@ -366,8 +366,8 @@ function calculateConfidenceInterval(
     confidenceLevel: number
 ): ConfidenceInterval {
     // Z-scores for common confidence levels
-    // 95% -> 1.96, 90% -> 1.645, 80% -> 1.28
-    const zScore = confidenceLevel === 95 ? 1.96 : 1.28;
+    // 95% -> 1.96, 90% -> 1.645, 80% -> 1.28, 70% -> 1.04
+    const zScore = confidenceLevel === 95 ? 1.96 : (confidenceLevel === 80 ? 1.28 : 1.04);
 
     // The prediction uncertainty is proportional to model standard deviation
     const predictionStdDev = prediction * modelStdDev;
@@ -453,7 +453,7 @@ function calculateDailyProjection(
             day: d,
             endScore: Math.round(predictedScore),
             isActual: false,
-            confidence95: calculateConfidenceInterval(predictedScore, scaledStdDev, 95),
+            confidence70: calculateConfidenceInterval(predictedScore, scaledStdDev, 70),
             confidence80: calculateConfidenceInterval(predictedScore, scaledStdDev, 80)
         });
     }
@@ -507,7 +507,7 @@ function calculateHourlyProjectionToday(
                 timestamp: timestamp,
                 score: Math.round(score),
                 isActual: false,
-                confidence95: calculateConfidenceInterval(score, stdDev, 95),
+                confidence70: calculateConfidenceInterval(score, stdDev, 70),
                 confidence80: calculateConfidenceInterval(score, stdDev, 80)
             });
             continue;
@@ -693,7 +693,7 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             currentScore: currentScore,
             currentDay: lastDayEnd,
             currentTime: requestInput?.currentTime ? new Date(requestInput.currentTime) : new Date(),
-            confidence95: calculateConfidenceInterval(result, modelStdDev, 95),
+            confidence70: calculateConfidenceInterval(result, modelStdDev, 70),
             confidence80: calculateConfidenceInterval(result, modelStdDev, 80),
             stdDev: stdDev,
             dailyProjection: dailyProjection,
@@ -781,7 +781,7 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             currentScore: currentScore,
             currentDay: lastDayEnd,
             currentTime: requestInput?.currentTime ? new Date(requestInput.currentTime) : new Date(),
-            confidence95: calculateConfidenceInterval(result, modelStdDev, 95),
+            confidence70: calculateConfidenceInterval(result, modelStdDev, 70),
             confidence80: calculateConfidenceInterval(result, modelStdDev, 80),
             stdDev: stdDev,
             dailyProjection: dailyProjection,
@@ -841,30 +841,30 @@ export async function predictAll(begin: number = 0) {
         let predictionResult = await predict(r);
         if (predictionResult !== null) {
             const predicted = predictionResult.prediction;
-            const ci95Lower = predictionResult.confidence95?.lower || 0;
-            const ci95Upper = predictionResult.confidence95?.upper || 0;
+            const ci70Lower = predictionResult.confidence70?.lower || 0;
+            const ci70Upper = predictionResult.confidence70?.upper || 0;
 
-            console.log(`T${r} ${predicted} (95% CI: ${ci95Lower}-${ci95Upper})`);
+            console.log(`T${r} ${predicted} (70% CI: ${ci70Lower}-${ci70Upper})`);
 
             // Test mode: Compare with actual
             if (debugTestMode && actualScores[r]) {
                 const actual = actualScores[r];
                 const error = predicted - actual;
                 const errorPercent = (error / actual * 100).toFixed(2);
-                const isWithinCI = actual >= ci95Lower && actual <= ci95Upper;
+                const isWithinCI = actual >= ci70Lower && actual <= ci70Upper;
 
                 console.log(`     Actual: ${actual}`);
                 console.log(`     Error: ${error} (${errorPercent}%)`);
-                console.log(`     Within 95% CI: ${isWithinCI ? '✓ YES' : '✗ NO'}`);
+                console.log(`     Within 70% CI: ${isWithinCI ? '✓ YES' : '✗ NO'}`);
 
                 testResults[r] = {
                     predicted: predicted,
                     actual: actual,
                     error: error,
                     errorPercent: parseFloat(errorPercent),
-                    confidence95: predictionResult.confidence95,
+                    confidence70: predictionResult.confidence70,
                     confidence80: predictionResult.confidence80,
-                    withinCI95: isWithinCI,
+                    withinCI70: isWithinCI,
                     withinCI80: actual >= (predictionResult.confidence80?.lower || 0) &&
                         actual <= (predictionResult.confidence80?.upper || 0)
                 };
