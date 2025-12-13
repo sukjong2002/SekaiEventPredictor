@@ -1,14 +1,15 @@
 import axios from 'axios';
-import {writeFileSync, existsSync, mkdirSync} from 'fs';
-import {execSync} from 'child_process';
-import {EventData} from "./Struct";
+import { writeFileSync, existsSync, mkdirSync } from 'fs';
+import { execSync } from 'child_process';
+import { EventData } from "./Struct";
 import HttpsProxyAgent from "https-proxy-agent";
 
 let agent = HttpsProxyAgent('http://localhost:1090');
 
 let proxy = false;
 // let event = [131, 132, 134, 135, 136, 138, 139, 141, 142, 148, 149, 150]
-let event = [121, 125, 127, 128, 129];
+// let event = [121, 125, 127, 128, 129];
+let event = [116, 117, 120]
 let events = 8;
 const ranks = [1, 2, 3, 4, 5, 10, 50, 100, 200, 300, 400, 500, 1000, 5000];
 
@@ -17,7 +18,7 @@ if (!existsSync("out")) mkdirSync("out");
 
 async function updateEventId() {
     const response = await axios.get(`https://strapi.sekai.best/sekai-current-event`, {
-        httpsAgent: proxy?agent:null,
+        httpsAgent: proxy ? agent : null,
     });
     let currentEvent = response.data.eventId;
     if (response.data.eventJson.rankingAnnounceAt > Date.now()) {
@@ -32,7 +33,7 @@ async function updateEventId() {
 
 async function downloadData(eventId: number, rankId: number) {
     const response = await axios.get(`https://api.sekai.best/event/${eventId}/rankings/graph?region=kr&rank=${rankId}`, {
-        httpsAgent: proxy?agent:null,
+        httpsAgent: proxy ? agent : null,
     });
     let data = response.data as EventData;
     let scores = data.data.eventRankings;
