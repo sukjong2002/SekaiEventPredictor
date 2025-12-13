@@ -242,52 +242,62 @@ async function getScores(rank: number, requestInput?: PredictionRequestInput, cu
 }
 
 function processDayScores(obj: EventRanking[], model: any, rank: number, eventStartTime: number) {
-    let dayPT: number[] = [];
-    for (let i = 0; i <= 15; ++i) {
-        dayPT.push(0);
+    let dayPT: { score: number, timestamp: number }[] = [];
+    let lastPoints: EventRanking[] = new Array(16 + 1).fill(null);
+
+    for (let i = 0; i <= 16; ++i) { // Increased to cover potential Day 3+
+        dayPT.push({ score: 0, timestamp: 0 });
     }
 
-    //console.log(new Date(eventStartTime))
     obj.forEach((it, i) => {
         let day = Math.floor(
-            (it.timestamp.getTime() - (eventStartTime - 15 * 3600 * 1000)) /
+            (it.timestamp.getTime() - 1 - (eventStartTime - 15 * 3600 * 1000)) /
             1000 /
             3600 /
             24
         );
 
-        if (debug) { // Force log for debugging
-            if (i === obj.length - 1) {
-                console.log(`Last point: ${it.timestamp.toISOString()}, Calculated Day: ${day}`);
+        // Track last point for fallback
+        if (day >= 0 && day < lastPoints.length) {
+            lastPoints[day] = it;
+        }
+
+        if (it.timestamp.getUTCHours() === 15 && it.timestamp.getUTCMinutes() === 0) {
+            if (day >= 0 && day < dayPT.length) {
+                dayPT[day].score = it.score;
+                dayPT[day].timestamp = it.timestamp.getTime();
             }
         }
 
-        //console.log(it.timestamp);
-        //console.log(day)
-
-        if (it.timestamp.getUTCHours() === 15 && it.timestamp.getUTCMinutes() === 0) {
-            if (debug) console.log(`Midnight match at day ${day}`);
-            dayPT[day - 1] = it.score;
-        }
-
-        if (i >= 1 && day >= 1 && dayPT[day - 1] === 0) {
+        if (i >= 1 && day >= 0 && day < dayPT.length && dayPT[day].score === 0) {
             let pre = obj[i - 1];
-            let lastDayEndTime = new Date(eventStartTime - 15 * 3600 * 1000 + day * 24 * 3600 * 1000);
+            let lastDayEndTime = new Date(eventStartTime - 15 * 3600 * 1000 + (day + 1) * 24 * 3600 * 1000);
+
             //Ensure pre is in past day
-            if (lastDayEndTime.getTime() < pre.timestamp.getTime()) return;
-            //console.log(pre.timestamp)
-            //console.log(getHalfTime(pre.timestamp))
-            let percentPre = model["dayPeriod"][rank][getHalfTime(pre.timestamp)];
-            let percentNow = model["dayPeriod"][rank][getHalfTime(it.timestamp)];
-            //console.log(percentPre);
-            //console.log(percentNow);
-            let scorePerDay = (it.score - pre.score) / (percentNow + 1 - percentPre);
-            //console.log(scorePerDay)
-            let averageScore = scorePerDay * (1 - percentPre);
-            //console.log(averageScore)
-            dayPT[day - 1] = averageScore + pre.score;
+            // Only interpolate if we cross the boundary
+            if (lastDayEndTime.getTime() >= pre.timestamp.getTime() && lastDayEndTime.getTime() <= it.timestamp.getTime()) {
+                let percentPre = model["dayPeriod"][rank][getHalfTime(pre.timestamp)];
+                let percentNow = model["dayPeriod"][rank][getHalfTime(it.timestamp)];
+
+                let scorePerDay = (it.score - pre.score) / (percentNow + 1 - percentPre);
+                let averageScore = scorePerDay * (1 - percentPre);
+
+                dayPT[day].score = averageScore + pre.score;
+                dayPT[day].timestamp = lastDayEndTime.getTime();
+            }
         }
     });
+
+    // Fallback: If dayPT score is 0 but we have lastPoints, use lastPoints
+    for (let i = 0; i < dayPT.length; i++) {
+        // day index in lastPoints is SAME as i (0-based now)
+        let d = i;
+        if (dayPT[i].score === 0 && d < lastPoints.length && lastPoints[d]) {
+            dayPT[i].score = lastPoints[d].score;
+            dayPT[i].timestamp = lastPoints[d].timestamp.getTime();
+        }
+    }
+
     return dayPT;
 }
 
@@ -403,29 +413,34 @@ function getModelStdDev(model: PredictionModel, rank: number, halfTime: number, 
 }
 
 function calculateDailyProjection(
-    dayScores: number[],
+    dayScores: { score: number, timestamp: number }[],
     lastDayEnd: number,
     totalDays: number,
     finalPrediction: number,
     scorePerNormalDay: number,
     model: PredictionModel,
-    rank: number
+    rank: number,
+    eventStartTime: number,
+    eventEndTime?: number
 ): DailyProjection[] {
     let projection: DailyProjection[] = [];
 
-    // Day 0 (always 0)
+    // Day 0 (Start Time)
     projection.push({
-        day: 0,
-        endScore: dayScores[0] || 0,
+        timestamp: eventStartTime,
+        endScore: dayScores[0]?.score || 0,
         isActual: true
     });
 
     // Days 1 to lastDayEnd (actual data)
     for (let d = 1; d < lastDayEnd; d++) {
-        if (dayScores[d] > 0) {
+        // Use actual timestamp if available (fallback logic handled in processDayScores)
+        let ts = dayScores[d]?.timestamp || (eventStartTime - 15 * 3600 * 1000 + d * 24 * 3600 * 1000);
+
+        if (dayScores[d]?.score > 0) {
             projection.push({
-                day: d,
-                endScore: Math.round(dayScores[d]),
+                timestamp: ts,
+                endScore: Math.round(dayScores[d].score),
                 isActual: true
             });
         }
@@ -434,13 +449,22 @@ function calculateDailyProjection(
     // Current/future days (predicted)
     for (let d = lastDayEnd; d <= totalDays; d++) {
         let predictedScore: number;
+        let ts: number;
 
         if (d < totalDays) {
             // Normal days: use average score per day
-            predictedScore = dayScores[0] + scorePerNormalDay * d;
+            predictedScore = dayScores[0].score + scorePerNormalDay * d;
+            // Standard End
+            ts = eventStartTime - 15 * 3600 * 1000 + d * 24 * 3600 * 1000;
         } else {
             // Last day: use final prediction
             predictedScore = finalPrediction;
+            // Use eventEndTime if provided, otherwise standard
+            if (eventEndTime) {
+                ts = eventEndTime;
+            } else {
+                ts = eventStartTime - 15 * 3600 * 1000 + d * 24 * 3600 * 1000;
+            }
         }
 
         // Calculate confidence intervals for predicted days
@@ -450,7 +474,7 @@ function calculateDailyProjection(
         let scaledStdDev = baseStdDev * Math.sqrt(daysAhead); // Uncertainty grows with time
 
         projection.push({
-            day: d,
+            timestamp: ts,
             endScore: Math.round(predictedScore),
             isActual: false,
             confidence70: calculateConfidenceInterval(predictedScore, scaledStdDev, 70),
@@ -461,6 +485,8 @@ function calculateDailyProjection(
     return projection;
 }
 
+
+
 function calculateHourlyProjectionToday(
     todayScores: number[],
     todayBeginScore: number,
@@ -470,7 +496,9 @@ function calculateHourlyProjectionToday(
     rank: number,
     isLastDay: boolean,
     eventStartTime: number,
-    currentTime?: number
+    dayIndex: number, // 1-based day index
+    currentTime?: number,
+    eventEndTime?: number
 ): TimePoint[] {
     let projection: TimePoint[] = [];
     let now = currentTime ? new Date(currentTime) : new Date();
@@ -485,7 +513,16 @@ function calculateHourlyProjectionToday(
     // Generate time points from current to end of day (48 half-hours)
     for (let h = 0; h <= 47; h++) {
         // Calculate timestamp (15:00 UTC previous day + h * 30 minutes)
-        let timestamp = new Date(eventStartTime - 15 * 3600 * 1000 + h * 30 * 60 * 1000);
+        // Adjust for current day: (dayIndex - 1) * 24 hours
+        let dayOffset = (dayIndex - 1) * 24 * 3600 * 1000;
+        let timestampValue = eventStartTime - 15 * 3600 * 1000 + dayOffset + h * 30 * 60 * 1000;
+
+        // Check eventEndTime overflow
+        if (eventEndTime && timestampValue > eventEndTime) {
+            continue;
+        }
+
+        let timestamp = new Date(timestampValue);
 
         // Check if this is actual or predicted
         let isActual = h <= currentHalfTime && todayScores[h] > 0;
@@ -528,6 +565,8 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
     // Determine context (Global vs Input)
     let currentEventType = eventType;
     let currentEventStartTime = eventStartTime;
+    // Extract eventEndTime if available
+    let currentEventEndTime = requestInput?.eventEndTime;
     let currentDays = days;
     let currentEventId = event;
 
@@ -578,10 +617,10 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
     let firstUsefulDay = 0;
     let lastDayEnd = 0;
     day.forEach((it, i) => {
-        if (firstUsefulDay === 0 && it > 0) {
+        if (firstUsefulDay === 0 && it.score > 0) {
             firstUsefulDay = i + 1;
         }
-        if (it > 0) {
+        if (it.score > 0) {
             lastDayEnd = i + 1;
         }
     })
@@ -590,64 +629,87 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
         return null;
     }
     debugInfo.firstUsefulDay = firstUsefulDay;
-    if (debug) console.log(`firstUsefulDay:${firstUsefulDay}`);
+    //if (debug) console.log(`firstUsefulDay:${firstUsefulDay}`);
     debugInfo.dayScores = day;
-    if (debug) console.log(`day:${day}`);
+    //if (debug) console.log(`day:${day}`);
 
     //Get today score
-    if (debug) console.log(`lastDayEnd:${lastDayEnd}`);
-    let todayBeginScore = day[lastDayEnd - 1];
-    if (debug) console.log(`todayBeginScore:${todayBeginScore}`);
+    //if (debug) console.log(`lastDayEnd:${lastDayEnd}`);
+    let todayBeginScore = day[lastDayEnd - 1].score;
+    //if (debug) console.log(`todayBeginScore:${todayBeginScore}`);
     let todayScores = processToday(scores);
-    if (debug) console.log(`todayScores:${todayScores}`);
+    //if (debug) console.log(`todayScores:${todayScores}`);
     let halfTime =
         todayScores.length === 0
             ? 0
             : getHalfTime(scores[scores.length - 1].timestamp);
 
     /*if(rank===50000) {
-          todayScores.forEach(it=>console.log(it))
           model["lastDayPeriod"][rank].forEach(it=>console.log(it))
       }*/
 
     //Get predict
     let isLastDay = lastDayEnd === currentDays;
-    if (debug) console.log(`lastEndDay:${lastDayEnd}`);
+    //if (debug) console.log(`lastEndDay:${lastDayEnd}`);
     debugInfo.lastDayEnd = lastDayEnd;
     if (!isLastDay) {
         //Not last day
-        let day0 = day[firstUsefulDay - 1];
-        if (debug) console.log(`day0:${day0}`);
+        let day0 = day[firstUsefulDay - 1].score;
+        //if (debug) console.log(`day0:${day0}`);
         let todayProcess = model["dayPeriod"][rank][halfTime];
-        if (debug) console.log(`todayProcess:${todayProcess}`);
+        //if (debug) console.log(`todayProcess:${todayProcess}`);
 
         //Predict by today data
         let todayScore =
             halfTime === 0 ? 0 : processLSE(todayScores, model["dayPeriod"][rank]);
-        if (debug) console.log(`todayScore:${todayScore}`);
+        //if (debug) console.log(`todayScore:${todayScore}`);
         debugInfo.todayScore = todayScore;
 
         //Weighted mean
         let scorePerNormalDay =
             (todayBeginScore - day0 + todayScore * todayProcess) /
             (lastDayEnd - firstUsefulDay + todayProcess);
-        if (debug) console.log(`scorePerNormalDay:${scorePerNormalDay}`);
+        //if (debug) console.log(`scorePerNormalDay:${scorePerNormalDay}`);
         debugInfo.scorePerNormalDay = scorePerNormalDay;
         let scoreNormalDays = scorePerNormalDay * (currentDays - 1);
-        if (debug) console.log(`scoreNormalDays:${scoreNormalDays}`);
+        //if (debug) console.log(`scoreNormalDays:${scoreNormalDays}`);
 
         //Calculate last day
-        if (debug) console.log(`lastDayRate:${model["lastDay"][rank][currentDays]}`);
+        //if (debug) console.log(`lastDayRate:${model["lastDay"][rank][currentDays]}`);
         let lastDayScore =
             (scoreNormalDays / (1 - model["lastDay"][rank][currentDays])) *
             model["lastDay"][rank][currentDays];
-        if (debug) console.log(`lastDayScore:${lastDayScore}`);
+        //if (debug) console.log(`lastDayScore:${lastDayScore}`);
         debugInfo.lastDayScore = lastDayScore;
+
+
 
         //Calculate predict result
         let result = Math.round(
-            day[0] + scoreNormalDays / (1 - model["lastDay"][rank][currentDays])
+            day[0].score + scoreNormalDays / (1 - model["lastDay"][rank][currentDays])
         );
+
+        // Adjust result if eventEndTime is provided (Exact End Time Prediction)
+        if (currentEventEndTime) {
+            let lastDayStartIdx = (currentDays - 1);
+            let lastDayStartTimestamp = currentEventStartTime - 15 * 3600 * 1000 + lastDayStartIdx * 24 * 3600 * 1000;
+            let msDiff = currentEventEndTime - lastDayStartTimestamp;
+            let index = Math.floor(msDiff / (30 * 60 * 1000));
+            // if (debug) console.log(`[Interpolation] Diff: ${msDiff}, Index: ${index}`);
+
+            if (index < 0) index = 0;
+            if (index > 47) index = 47;
+
+            let progress = model.lastDayPeriod[rank][index];
+            if (progress === undefined) progress = 1.0;
+            // if (debug) console.log(`[Interpolation] Progress at index ${index}: ${progress}`);
+
+            // result is EndScore. LastDayStart = result - lastDayScore.
+            // exact = Start + increment * progress
+            // let oldResult = result;
+            result = Math.round((result - lastDayScore) + lastDayScore * progress);
+            // if (debug) console.log(`[Interpolation] Result adjusted: ${oldResult} -> ${result}`);
+        }
         debugInfo.result = result;
         debugJson.ranks[rank] = debugInfo;
 
@@ -663,12 +725,14 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             result,
             scorePerNormalDay,
             model,
-            rank
+            rank,
+            currentEventStartTime,
+            currentEventEndTime
         );
 
         // Calculate predicted today end score
         let predictedTodayEndScore = lastDayEnd < currentDays
-            ? (day[0] + scorePerNormalDay * lastDayEnd)
+            ? (day[0].score + scorePerNormalDay * lastDayEnd)
             : result;
 
         // Calculate hourly projection for today
@@ -681,7 +745,9 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             rank,
             false,
             currentEventStartTime,
-            requestInput?.currentTime
+            lastDayEnd, // Current Day Index
+            requestInput?.currentTime,
+            currentEventEndTime
         );
 
         // Get current score (last actual score)
@@ -724,8 +790,9 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             todayScoreNowPredict * (1 - todayProcess);
 
         //Predict by past days
+        // Need to use day[0].score
         let todayScorePastPredict =
-            ((todayBeginScore - day[0]) / (1 - model["lastDay"][rank][currentDays])) *
+            ((todayBeginScore - day[0].score) / (1 - model["lastDay"][rank][currentDays])) *
             model["lastDay"][rank][currentDays];
         if (debug) console.log("Past Predict:" + todayScorePastPredict);
 
@@ -735,6 +802,23 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             todayScorePastPredict * Math.max(0, 1 - todayProcess * 2);
 
         let result = Math.round(todayBeginScore + todayScore);
+
+        // Adjust result if eventEndTime is provided (Exact End Time Prediction)
+        if (currentEventEndTime) {
+            let lastDayStartIdx = (currentDays - 1);
+            let lastDayStartTimestamp = currentEventStartTime - 15 * 3600 * 1000 + lastDayStartIdx * 24 * 3600 * 1000;
+            let msDiff = currentEventEndTime - lastDayStartTimestamp;
+            let index = Math.floor(msDiff / (30 * 60 * 1000));
+            if (index < 0) index = 0;
+            if (index > 47) index = 47;
+
+            let progress = model.lastDayPeriod[rank][index];
+            if (progress === undefined) progress = 1.0;
+            // todayBeginScore IS LastDayStartScore in this branch
+            // todayScore IS the full day increment
+            result = Math.round(todayBeginScore + todayScore * progress);
+        }
+
         debugInfo.result = result;
         debugJson.ranks[rank] = debugInfo;
 
@@ -743,7 +827,7 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
         let stdDev = result * modelStdDev;
 
         // Calculate scorePerNormalDay for daily projection
-        let scorePerNormalDay = (todayBeginScore - day[0]) / (currentDays - 1);
+        let scorePerNormalDay = (todayBeginScore - day[0].score) / (currentDays - 1);
 
         // Calculate daily projection
         let dailyProjection = calculateDailyProjection(
@@ -753,7 +837,9 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             result,
             scorePerNormalDay,
             model,
-            rank
+            rank,
+            currentEventStartTime,
+            currentEventEndTime
         );
 
         // Calculate predicted today end score (which is the final result on last day)
@@ -769,7 +855,9 @@ export async function predict(rank: number, requestInput?: PredictionRequestInpu
             rank,
             true,
             currentEventStartTime,
-            requestInput?.currentTime
+            lastDayEnd, // Current Day Index
+            requestInput?.currentTime,
+            currentEventEndTime
         );
 
         // Get current score (last actual score)

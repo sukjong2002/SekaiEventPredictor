@@ -45,7 +45,7 @@ export interface TimePoint {
 }
 
 export interface DailyProjection {
-    day: number;              // 일차 (0부터 시작)
+    timestamp: number;        // 해당 일의 끝 시점 timestamp
     endScore: number;         // 해당 일의 끝 시점 점수 (15:00 UTC)
     isActual: boolean;        // 실제 데이터 여부
     confidence70?: ConfidenceInterval;
@@ -83,7 +83,8 @@ export interface PredictionModel {
 export interface PredictionRequestInput {
     eventType: string;
     eventStartTime: number;
-    totalDays: number;
+    eventEndTime?: number; // Optional: Event End Time to calculate totalDays
+    totalDays?: number;    // Optional if eventEndTime is provided
     rank: number;
     currentTime?: number; // Optional timestamp to override Date.now()
     data: { timestamp: number; score: number }[];
