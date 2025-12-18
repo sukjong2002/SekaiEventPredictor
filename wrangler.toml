@@ -1,0 +1,8 @@
+name = "sekai-event-predictor"
+main = "worker.ts"
+compatibility_date = "2023-12-01"
+
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 15, period = 60 }

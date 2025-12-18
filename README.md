@@ -14,6 +14,32 @@ ts-node genModel.ts
 ts-node predict.ts
 ```
 
+### Cloudflare Workers
+
+Serverless deployment with high-performance edge caching and DDoS protection.
+
+**Setup:**
+```sh
+npm install
+npx wrangler login
+```
+
+**Local Development:**
+```sh
+npx wrangler dev
+# Server running at http://localhost:8787
+```
+
+**Deploy:**
+```sh
+npx wrangler deploy
+```
+
+**Features:**
+- **Zero Config**: Model is bundled with the worker.
+- **DDoS Protection**: Native Rate Limiting (default 15 requests/min).
+- **Caching**: 10-minute edge caching
+
 ### Debug Test Mode
 
 Test prediction accuracy using historical event data. This mode simulates prediction at a specific progress point (default: 50%) and compares the result with actual final scores.
